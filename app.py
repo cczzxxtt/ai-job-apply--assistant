@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import sqlite3, urllib.parse, requests, re, io
+import sqlite3, urllib.parse, requests, re, io, xml.etree.ElementTree as ET
 from datetime import date, datetime
 from html.parser import HTMLParser
 
@@ -82,16 +82,38 @@ def fetch_jobs():
 def fetch_candidates():
     c=connect(); df=pd.read_sql_query("SELECT * FROM candidates ORDER BY match_score DESC,found_at DESC",c); c.close(); return df
 def search_ddg(query,city,max_results=8):
-    url="https://html.duckduckgo.com/html/?q="+urllib.parse.quote(query)
     headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36"}
-    r=requests.get(url,headers=headers,timeout=20); r.raise_for_status()
-    parser=DDGParser(); parser.feed(r.text); out=[]; seen=set()
-    for it in parser.items:
-        if it["url"] and it["url"] not in seen:
-            seen.add(it["url"]); score,reasons,risks=score_candidate(it["title"],it["snippet"],city)
-            out.append({**it,"city":city,"query":query,"source":"DuckDuckGo搜索","match_score":score,"fit_reasons":reasons,"risk_flags":risks})
-        if len(out)>=max_results:break
-    return out
+    out=[]; seen=set(); engine_used="DuckDuckGo搜索"
+    # First try DuckDuckGo HTML results
+    try:
+        url="https://html.duckduckgo.com/html/?q="+urllib.parse.quote(query)
+        r=requests.get(url,headers=headers,timeout=20); r.raise_for_status()
+        parser=DDGParser(); parser.feed(r.text)
+        for it in parser.items:
+            if it["url"] and it["url"] not in seen:
+                seen.add(it["url"]); out.append(it)
+    except Exception:
+        pass
+    # If DDG is blocked or its HTML layout changes, fall back to Bing RSS
+    if not out:
+        try:
+            rss_url="https://www.bing.com/search?format=rss&q="+urllib.parse.quote(query)
+            rr=requests.get(rss_url,headers=headers,timeout=20); rr.raise_for_status()
+            root=ET.fromstring(rr.text)
+            for item in root.findall('.//item'):
+                title=item.findtext('title') or ""
+                link=item.findtext('link') or ""
+                snippet=item.findtext('description') or ""
+                if link and link not in seen:
+                    seen.add(link); out.append({"title":title,"url":link,"snippet":snippet})
+            engine_used="Bing RSS备用搜索"
+        except Exception:
+            pass
+    results=[]
+    for it in out[:max_results]:
+        score,reasons,risks=score_candidate(it.get("title",""),it.get("snippet",""),city)
+        results.append({**it,"city":city,"query":query,"source":engine_used,"match_score":score,"fit_reasons":reasons,"risk_flags":risks})
+    return results
 def save_candidates(rows):
     c=connect()
     for x in rows:
